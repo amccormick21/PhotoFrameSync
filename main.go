@@ -58,7 +58,7 @@ func (gp *GooglePhotosClient) SearchMediaItems(filterPayload map[string]interfac
 		}
 		payloadBytes, err := json.Marshal(payload)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error marshaling payload: %v", err)
 		}
 
 		req, err := http.NewRequest("POST", url, bytes.NewReader(payloadBytes))
@@ -139,14 +139,23 @@ func DownloadMediaItem(item MediaItem, folder string, client *http.Client) error
 
 // getClient retrieves an authenticated HTTP client using OAuth2 credentials.
 // It reads the OAuth2 token from token.json (if it exists) or triggers a web auth flow.
-func getClient(config *oauth2.Config) *http.Client {
+func getClient(config *oauth2.Config) (*http.Client, *oauth2.Token) {
 	const tokenFile = "token.json"
 	tok, err := tokenFromFile(tokenFile)
 	if err != nil {
-		tok = getTokenFromWeb(config)
-		saveToken(tokenFile, tok)
+		tok, err = getNewTokenAndSave(config, tokenFile)
+		if err != nil {
+			log.Fatalf("Unable to retrieve token: %v", err)
+		}
 	}
-	return config.Client(context.Background(), tok)
+	// Check the expiry date of the token: do we need to refresh?
+	if tok.Expiry.Before(time.Now()) {
+		tok, err = getNewTokenAndSave(config, tokenFile)
+		if err != nil {
+			log.Fatalf("Unable to retrieve token: %v", err)
+		}
+	}
+	return config.Client(context.Background(), tok), tok
 }
 
 // tokenFromFile retrieves an OAuth2 token from a file.
@@ -221,6 +230,12 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "Authorization code received. You can close this window.")
 }
 
+func getNewTokenAndSave(config *oauth2.Config, tokenFile string) (*oauth2.Token, error) {
+	tok := getTokenFromWeb(config)
+	saveToken(tokenFile, tok)
+	return tok, nil
+}
+
 func main() {
 	// Parse the command-line flag for the target download folder.
 	folderPtr := flag.String("folder", "", "Folder location on your PC where photos will be saved")
@@ -239,17 +254,17 @@ func main() {
 	// Load OAuth2 configuration from credentials.json.
 	creds, err := os.ReadFile("credentials.json")
 	if err != nil {
-		log.Fatalf("Unable to read credentials file: %v", err)
+		log.Printf("Unable to read credentials file: %v", err)
 	}
 
-	config, err := google.ConfigFromJSON(creds, "https://www.googleapis.com/auth/photoslibrary.readonly")
+	const scope = "https://www.googleapis.com/auth/photoslibrary.readonly"
+	config, err := google.ConfigFromJSON(creds, scope)
 
 	if err != nil {
 		log.Fatalf("Unable to parse credentials file to config: %v", err)
 	}
-	client := getClient(config)
+	client, _ := getClient(config)
 
-	// Initialize our Google Photos client.
 	photosClient := &GooglePhotosClient{client: client}
 
 	// Define the filter payload.
